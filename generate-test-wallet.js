@@ -1,6 +1,5 @@
 const ethers = require('ethers');
 
-// Create a random wallet for testing
 function generateTestWallet() {
   const wallet = ethers.Wallet.createRandom();
   const message = "Verify wallet ownership for blockchain-notification-system";
@@ -9,7 +8,7 @@ function generateTestWallet() {
     walletAddress: wallet.address,
     privateKey: wallet.privateKey,
     message: message,
-    // Store these for reference but we'll generate the signature in the next step
+    
     wallet: wallet
   };
 }

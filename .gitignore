@@ -115,7 +115,7 @@ temp/
 *.key
 
 # Firebase service account credentials
-firebase-service-account.json
+firebase-credentials.json
 
 # Blockchain account private keys or mnemonic phrases
 *.private
