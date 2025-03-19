@@ -1,49 +1,94 @@
+// test-registration.js
 const axios = require('axios');
-const ethers = require('ethers');
-const walletData = require('./generate-test-wallet');
 
-async function testUserRegistration() {
+// Configuration
+const API_URL = 'http://localhost:3000/api/users/register';
+const MESSAGE_TO_SIGN = 'Verify wallet ownership for blockchain-notification-system';
+
+async function testRegistration() {
   try {
-    // Use the wallet from the first script
-    const wallet = walletData.wallet;
-    const message = walletData.message;
+    console.log('Save these details for subsequent test steps');
+    console.log('Generated test data:');
+    
+    // Import ethers and determine version
+    let ethers;
+    try {
+      ethers = require('ethers');
+      console.log('Ethers version:', ethers.version || 'Unknown');
+    } catch (error) {
+      console.error('Error importing ethers:', error);
+      process.exit(1);
+    }
+    
+    // Create a new wallet for testing - handle both v5 and v6
+    let wallet;
+    if (ethers.Wallet && ethers.Wallet.createRandom) {
+      // Ethers v5
+      wallet = ethers.Wallet.createRandom();
+    } else if (ethers.wallet && ethers.wallet.createRandom) {
+      // Ethers v6
+      wallet = ethers.wallet.createRandom();
+    } else {
+      throw new Error('Could not find Wallet.createRandom method');
+    }
+    
+    const walletAddress = wallet.address;
+    console.log('Wallet Address:', walletAddress);
     
     // Sign the message
-    const signature = await wallet.signMessage(message);
-    
-    console.log('Generated test data:');
-    console.log('Wallet Address:', wallet.address);
+    const signature = await wallet.signMessage(MESSAGE_TO_SIGN);
     console.log('Signature:', signature);
     
-    // Make the API request to register the user
-    console.log('\nSending registration request...');
-    const response = await axios.post('http://localhost:3000/api/users/register', {
-      name: 'Test User',
-      email: 'testuser@example.com',
-      walletAddress: wallet.address,
-      fcmToken: 'test-fcm-token-123', // In a real app, this would come from Firebase
-      signature: signature
-    });
-    
-    console.log('\nRegistration successful!');
-    console.log('API Response:', response.data);
-    return response.data;
-  } catch (error) {
-    console.error('\nRegistration failed:');
-    if (error.response) {
-      // The request was made and the server responded with a status code
-      // that falls out of the range of 2xx
-      console.error('Error data:', error.response.data);
-      console.error('Status code:', error.response.status);
-    } else if (error.request) {
-      // The request was made but no response was received
-      console.error('No response received:', error.request);
+    // Verify the signature on the client side first
+    let recoveredAddress;
+    if (ethers.utils && ethers.utils.verifyMessage) {
+      // Ethers v5
+      console.log('Using ethers v5 verification method');
+      recoveredAddress = ethers.utils.verifyMessage(MESSAGE_TO_SIGN, signature);
+    } else if (ethers.verifyMessage) {
+      // Ethers v6
+      console.log('Using ethers v6 verification method');
+      recoveredAddress = ethers.verifyMessage(MESSAGE_TO_SIGN, signature);
     } else {
-      // Something happened in setting up the request that triggered an Error
-      console.error('Error message:', error.message);
+      throw new Error('Could not find verifyMessage method');
     }
+    
+    console.log('Recovered Address:', recoveredAddress);
+    console.log('Verification Match:', recoveredAddress.toLowerCase() === walletAddress.toLowerCase());
+    
+    // Prepare registration data
+    const registrationData = {
+      name: 'Test User',
+      email: `test_${Date.now()}@example.com`,
+      fcmToken: 'test-fcm-token',
+      walletAddress: walletAddress,
+      signature: signature,
+      messageToSign: MESSAGE_TO_SIGN
+    };
+    
+    console.log('Sending registration request...');
+    const response = await axios.post(API_URL, registrationData);
+    
+    console.log('Registration successful!');
+    console.log('Response:', response.data);
+    
+    return {
+      walletAddress,
+      signature,
+      messageToSign: MESSAGE_TO_SIGN
+    };
+  } catch (error) {
+    console.log('Registration failed:');
+    if (error.response) {
+      console.log('Error data:', error.response.data);
+      console.log('Status code:', error.response.status);
+    } else {
+      console.log('Error:', error.message);
+      console.log('Error stack:', error.stack);
+    }
+    return null;
   }
 }
 
-
-testUserRegistration();
+// Run the test
+testRegistration();
