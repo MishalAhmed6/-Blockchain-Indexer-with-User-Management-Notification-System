@@ -3,6 +3,7 @@ const bodyParser = require('body-parser');
 const dotenv = require('dotenv');
 const connectDB = require('./config/db');
 const { initializeFirebase } = require('./config/firebase');
+const { verifyWalletAddress } = require('./utils/walletVerification'); // Import the verification function
 
 // Load environment variables
 dotenv.config();
@@ -30,9 +31,9 @@ app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
   if (req.method === 'POST' && req.originalUrl.includes('/register')) {
     // Log registration request details, but protect sensitive data
-    const { address, message } = req.body;
-    const signature = req.body.signature ? `${req.body.signature.substring(0, 10)}...` : undefined;
-    console.log('Registration request:', { address, message, signature: signature });
+    const { walletAddress, messageToSign, signature } = req.body;
+    const truncatedSignature = signature ? `${signature.substring(0, 10)}...` : undefined;
+    console.log('Registration request:', { walletAddress, messageToSign, signature: truncatedSignature });
   }
   next();
 });
@@ -78,6 +79,29 @@ try {
 
 // Routes
 app.use('/api/users', require('./routes/userRoutes'));
+
+// Wallet verification endpoint
+app.post('/api/verify-wallet', async (req, res) => {
+  const { walletAddress, signature, messageToSign } = req.body;
+
+  console.log('Received verification request with:', {
+    walletAddress: walletAddress,
+    signature: signature,
+    messageToSign: messageToSign
+  });
+
+  if (!walletAddress || !signature || !messageToSign) {
+    return res.status(400).json({ message: 'Missing required fields' });
+  }
+
+  const isValid = await verifyWalletAddress(walletAddress, messageToSign, signature);
+
+  if (isValid) {
+    return res.status(200).json({ message: 'Wallet verification succeeded' });
+  } else {
+    return res.status(401).json({ message: 'Wallet verification failed' });
+  }
+});
 
 // Default route
 app.get('/', (req, res) => {
