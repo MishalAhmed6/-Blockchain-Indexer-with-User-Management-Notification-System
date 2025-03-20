@@ -52,7 +52,6 @@ class BlockchainListener {
 
   async createProvider() {
     try {
-      // In v6, WebSocketProvider is created differently
       const provider = new ethers.WebSocketProvider(this.rpcUrl);
       
       // Set up reconnection logic
@@ -118,12 +117,12 @@ class BlockchainListener {
   }
 
   startListening() {
-    // In ethers v6, we'll use a combination of block events and polling
+    
     this.provider.on("block", (blockNumber) => {
       this.processNewBlock(blockNumber);
     });
     
-    // Also set up a failsafe polling mechanism
+   
     this.blockPollInterval = setInterval(async () => {
       try {
         const latestBlock = await this.provider.getBlockNumber();
@@ -267,7 +266,7 @@ class BlockchainListener {
       
       console.log(`Transaction ${txDetails.hash} stored in database`);
     } catch (error) {
-      // Handle duplicate transaction errors gracefully
+      // Handle duplicate transaction errors properly
       if (!error.toString().includes("Unique constraint")) {
         console.error(`Error storing transaction ${txDetails.hash}:`, error);
       }
@@ -319,7 +318,7 @@ class BlockchainListener {
           pref.type === type && pref.enabled
         )) {
           // Trigger push notification, email, etc. based on user preferences
-          // This would integrate with your notification service
+          
           console.log(`Push notification triggered for user ${wallet.userId}`);
         }
       }
