@@ -29,7 +29,8 @@ async function runAllTests() {
         email: 'completetest@example.com',
         walletAddress: wallet.address,
         fcmToken: 'complete-test-fcm-token-123',
-        signature: signature
+        signature: signature,
+        messageToSign: message  // Add this line to include the message
       });
       
       console.log('Registration successful!');
@@ -38,6 +39,7 @@ async function runAllTests() {
       console.error('Registration failed:');
       if (error.response) {
         console.error('Error data:', error.response.data);
+        console.error('Full error response:', error.response);
       } else {
         console.error('Error:', error.message);
       }

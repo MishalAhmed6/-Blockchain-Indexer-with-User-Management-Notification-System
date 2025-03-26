@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const User = require('../models/User');
 const ethers = require('ethers');
 
 // Debugging: Log ethers version and methods
@@ -44,26 +45,97 @@ function verifyWalletSignature(walletAddress, message, signature) {
 
 router.post('/register', async (req, res) => {
   try {
-    const { walletAddress, signature, messageToSign } = req.body;
+    const { 
+      walletAddress, 
+      signature, 
+      messageToSign, 
+      fcmToken, 
+      email, 
+      name 
+    } = req.body;
 
     console.log('Received registration request with:', {
       walletAddress,
       signature,
-      messageToSign
+      messageToSign,
+      fcmToken,
+      email,
+      name
     });
+
+    // Validate required fields
+    if (!fcmToken || !email || !name) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Missing required fields',
+        requiredFields: ['fcmToken', 'email', 'name']
+      });
+    }
 
     // Verify the wallet signature
     const isValid = verifyWalletSignature(walletAddress, messageToSign, signature);
 
     if (!isValid) {
-      return res.status(401).json({ success: false, message: 'Wallet verification failed' });
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Wallet verification failed' 
+      });
     }
 
-    // Continue with registration logic...
-    return res.status(200).json({ success: true, message: 'User registered successfully' });
+    // Check if user already exists
+    let user = await User.findOne({ 
+      $or: [
+        { walletAddress: walletAddress.toLowerCase() },
+        { email: email.toLowerCase() }
+      ]
+    });
+
+    // If user doesn't exist, create new user
+    if (!user) {
+      user = new User({
+        walletAddress: walletAddress.toLowerCase(),
+        fcmToken,
+        email: email.toLowerCase(),
+        name,
+        lastLogin: new Date()
+      });
+      await user.save();
+    } else {
+      // Update existing user details
+      user.fcmToken = fcmToken;
+      user.email = email.toLowerCase();
+      user.name = name;
+      user.lastLogin = new Date();
+      await user.save();
+    }
+
+    return res.status(200).json({ 
+      success: true, 
+      message: 'User registered successfully',
+      user: {
+        walletAddress: user.walletAddress,
+        email: user.email,
+        name: user.name,
+        lastLogin: user.lastLogin
+      }
+    });
+
   } catch (error) {
     console.error('Registration error:', error);
-    return res.status(500).json({ success: false, message: 'Server error' });
+    
+    // Handle specific MongoDB duplicate key error
+    if (error.code === 11000) {
+      return res.status(409).json({ 
+        success: false, 
+        message: 'Wallet address or email already registered' 
+      });
+    }
+
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Server error during registration',
+      error: error.message 
+    });
   }
 });
 
