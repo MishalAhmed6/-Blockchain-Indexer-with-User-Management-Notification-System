@@ -2,7 +2,9 @@ const express = require('express');
 const router = express.Router();
 const BlockchainListener = require('../services/BlockchainListener');
 const User = require('../models/User');
+const Transaction = require('../models/Transaction');
 const ethers = require('ethers');
+const admin = require('firebase-admin');
 
 // Blockchain Listener Initialization
 let blockchainListener = null;
@@ -550,5 +552,164 @@ router.post('/notifications/send-test', async (req, res) => {
   }
 });
 
+// API to log a transaction
+router.post('/transactions/log', async (req, res) => {
+    try {
+        const {
+            walletAddress,
+            transactionData
+        } = req.body;
+
+        // Find the user
+        const user = await User.findOne({ walletAddress: walletAddress.toLowerCase() });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Add transaction to user's transaction history
+        user.transactionHistory.push({
+            hash: transactionData.hash,
+            from: transactionData.from,
+            to: transactionData.to,
+            value: transactionData.value,
+            tokenAddress: transactionData.tokenAddress,
+            tokenSymbol: transactionData.tokenSymbol,
+            blockNumber: transactionData.blockNumber,
+            timestamp: transactionData.timestamp,
+            type: transactionData.type,
+            status: transactionData.status,
+            gasUsed: transactionData.gasUsed,
+            gasPrice: transactionData.gasPrice
+        });
+
+        await user.save();
+        res.status(201).json({ 
+            message: 'Transaction logged successfully', 
+            transaction: user.transactionHistory[user.transactionHistory.length - 1]
+        });
+    } catch (error) {
+        console.error('Error logging transaction:', error);
+        res.status(500).json({ message: 'Failed to log transaction', error: error.message });
+    }
+});
+
+// API to send transaction notifications
+router.post('/transactions/notify', async (req, res) => {
+    try {
+        const { transactionHash, walletAddress } = req.body;
+
+        // Find the user
+        const user = await User.findOne({ walletAddress: walletAddress.toLowerCase() });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Find the transaction in user's history
+        const transaction = user.transactionHistory.find(tx => tx.hash === transactionHash);
+        if (!transaction) {
+            return res.status(404).json({ message: 'Transaction not found' });
+        }
+
+        // Check if user has notifications enabled and FCM token
+        if (!user.notificationsEnabled || !user.fcmToken) {
+            return res.status(400).json({ message: 'User notifications not enabled or FCM token missing' });
+        }
+
+        const isSender = user.walletAddress.toLowerCase() === transaction.from.toLowerCase();
+        const isReceiver = user.walletAddress.toLowerCase() === transaction.to.toLowerCase();
+        
+        let title = 'Transaction Alert';
+        let body = '';
+        
+        if (isSender) {
+            body = `You sent ${transaction.value} ${transaction.tokenSymbol} to ${transaction.to}`;
+        } else if (isReceiver) {
+            body = `You received ${transaction.value} ${transaction.tokenSymbol} from ${transaction.from}`;
+        }
+
+        const message = {
+            notification: {
+                title,
+                body
+            },
+            token: user.fcmToken
+        };
+
+        try {
+            await admin.messaging().send(message);
+            console.log(`Notification sent to user ${user._id}`);
+            
+            // Update transaction notification status
+            transaction.notificationSent = true;
+            await user.save();
+
+            res.status(200).json({ 
+                message: 'Notification sent successfully'
+            });
+        } catch (error) {
+            console.error(`Failed to send notification to user ${user._id}:`, error);
+            res.status(500).json({ message: 'Failed to send notification', error: error.message });
+        }
+    } catch (error) {
+        console.error('Error processing notification:', error);
+        res.status(500).json({ message: 'Failed to process notification', error: error.message });
+    }
+});
+
+// API to make a transaction
+router.post('/transactions/send', async (req, res) => {
+    try {
+        const { from, to, value, privateKey, walletAddress } = req.body;
+
+        // Create Web3 provider
+        const provider = new ethers.providers.JsonRpcProvider(process.env.ALCHEMY_HTTP_URL);
+        
+        // Create wallet instance
+        const wallet = new ethers.Wallet(privateKey, provider);
+
+        // Create transaction object
+        const tx = {
+            to,
+            value: ethers.utils.parseEther(value)
+        };
+
+        // Send transaction
+        const transaction = await wallet.sendTransaction(tx);
+        
+        // Wait for transaction to be mined
+        const receipt = await transaction.wait();
+
+        // Find user and log the transaction
+        const user = await User.findOne({ walletAddress: walletAddress.toLowerCase() });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const block = await provider.getBlock(receipt.blockNumber);
+        user.transactionHistory.push({
+            hash: transaction.hash,
+            from,
+            to,
+            value,
+            blockNumber: receipt.blockNumber,
+            timestamp: block.timestamp,
+            type: 'SEND',
+            status: receipt.status === 1 ? 'CONFIRMED' : 'FAILED',
+            gasUsed: receipt.gasUsed,
+            gasPrice: transaction.gasPrice.toString()
+        });
+
+        await user.save();
+
+        res.status(200).json({
+            message: 'Transaction sent successfully',
+            transactionHash: transaction.hash,
+            receipt
+        });
+    } catch (error) {
+        console.error('Error sending transaction:', error);
+        res.status(500).json({ message: 'Failed to send transaction', error: error.message });
+    }
+});
 
 module.exports = router;

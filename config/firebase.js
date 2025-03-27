@@ -1,16 +1,13 @@
 const admin = require('firebase-admin');
-const path = require('path');
-const dotenv = require('dotenv');
+require('dotenv').config();
 
-dotenv.config();
-
-
-const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || path.join(__dirname, '../firebase-credentials.json');
+const serviceAccount = require('../firebase-credentials.json');
 
 const initializeFirebase = () => {
   try {
     admin.initializeApp({
-      credential: admin.credential.cert(serviceAccountPath)
+      credential: admin.credential.cert(serviceAccount),
+      databaseURL: process.env.FIREBASE_DATABASE_URL || 'https://blockchain-indexer-223eb-default-rtdb.firebaseio.com'
     });
     console.log('Firebase Admin initialized successfully');
   } catch (error) {
@@ -19,4 +16,4 @@ const initializeFirebase = () => {
   }
 };
 
-module.exports = { initializeFirebase, admin };
+module.exports = { initializeFirebase };

@@ -1,361 +1,229 @@
 const Web3 = require('web3');
 const { EventEmitter } = require('events');
 const mongoose = require('mongoose');
+require('dotenv').config();
 
-class BlockchainListener {
-  constructor(rpcUrl, options = {}) {
-    this.rpcUrl = rpcUrl;
-    this.options = {
-      blockConfirmations: options.blockConfirmations || 1,
-      reconnectDelay: options.reconnectDelay || 5000,
-      maxReconnectAttempts: options.maxReconnectAttempts || 5,
-      walletSyncInterval: options.walletSyncInterval || 60 * 1000, // 1 minute
-      pollInterval: options.pollInterval || 4000, // 4 seconds
-    };
-    this.registeredWallets = new Set();
-    this.reconnectAttempts = 0;
-    this.connectionActive = false;
-    this.latestBlockProcessed = 0;
-    this.provider = null;
-    this.blockPollInterval = null;
-    this.pendingTxs = new Map(); // Track pending transactions
-  }
-
-  async initialize() {
-    try {
-      // Create provider (v6 handles WebSockets differently)
-      this.provider = await this.createProvider();
-      
-      // Initial load of registered wallets from database
-      await this.syncWallets();
-      
-      // Set up periodic wallet sync
-      this.walletSyncIntervalId = setInterval(() => {
-        this.syncWallets();
-      }, this.options.walletSyncInterval);
-      
-      // Get current block and start listening
-      const currentBlock = await this.provider.getBlockNumber();
-      this.latestBlockProcessed = currentBlock;
-      console.log(`Starting to listen from block ${currentBlock}`);
-      
-      // Start listening to new blocks
-      this.startListening();
-      
-      console.log("Blockchain listener initialized successfully");
-      return true;
-    } catch (error) {
-      console.error("Error initializing blockchain listener:", error);
-      throw error;
-    }
-  }
-
-  async createProvider() {
-    try {
-      // In v6, WebSocketProvider is created differently
-      const provider = new ethers.WebSocketProvider(this.rpcUrl);
-      
-      // Set up reconnection logic
-      provider._websocket.on("close", () => {
-        console.log("WebSocket connection closed");
-        this.connectionActive = false;
-        clearInterval(this.blockPollInterval);
+class BlockchainListener extends EventEmitter {
+    constructor(alchemyUrl = process.env.ALCHEMY_WEBSOCKET_URL, UserModel, options = {}) {
+        super();
+        this.alchemyUrl = alchemyUrl;
+        this.UserModel = UserModel;
         
-        if (this.reconnectAttempts < this.options.maxReconnectAttempts) {
-          this.reconnectAttempts++;
-          console.log(`Attempting to reconnect (${this.reconnectAttempts}/${this.options.maxReconnectAttempts})...`);
-          
-          setTimeout(async () => {
+        this.options = {
+            pollingInterval: 15000,
+            walletAddressField: 'walletAddress',
+            notificationEnabledField: 'notificationsEnabled',
+            fcmTokenField: 'fcmToken',
+            verbose: true,
+            ...options
+        };
+
+        this.web3 = null;
+        this.lastProcessedBlock = null;
+        this.isListening = false;
+    }
+
+    async connect() {
+        try {
+            console.log('[Blockchain Listener] Connecting to Alchemy...');
+
+            // Create Web3 instance with WebSocket provider
+            this.web3 = new Web3(new Web3.providers.WebsocketProvider(this.alchemyUrl, {
+                timeout: 30000,
+                reconnect: {
+                    auto: true,
+                    delay: 5000,
+                    maxAttempts: 5
+                }
+            }));
+
+            // Verify connection with multiple checks
+            const networkId = await this.web3.eth.net.getId();
+            const blockNumber = await this.web3.eth.getBlockNumber();
+            const networkType = await this.web3.eth.net.getNetworkType();
+
+            console.log('[Blockchain Listener] Connected Successfully!');
+            console.log('- Network ID: ' + networkId);
+            console.log('- Current Block: ' + blockNumber);
+            console.log('- Network Type: ' + networkType);
+
+            return this.web3;
+        } catch (error) {
+            console.error('[Blockchain Listener] Connection Error:', error.message);
+            throw new Error('Failed to connect to Alchemy: ' + error.message);
+        }
+    }
+
+    async initialize() {
+        try {
+            // Ensure connection
+            if (!this.web3) {
+                await this.connect();
+            }
+
+            // Get the current block number to start from
+            this.lastProcessedBlock = await this.web3.eth.getBlockNumber();
+
+            console.log('[Blockchain Listener] Initialized. Starting from block: ' + this.lastProcessedBlock);
+        } catch (error) {
+            console.error('[Blockchain Listener] Initialization Error:', error.message);
+            throw error;
+        }
+    }
+
+    async getUserWallets() {
+        try {
+            // Detailed connection state logging
+            console.log('Mongoose Connection State:', mongoose.connection.readyState);
+            console.log('Mongoose Connection:', mongoose.connection);
+    
+            // More robust connection check
+            if (mongoose.connection.readyState !== 1) {
+                console.error('[CRITICAL] MongoDB is not connected');
+                
+                // Additional diagnostics
+                console.log('Connection Details:', {
+                    host: mongoose.connection.host,
+                    port: mongoose.connection.port,
+                    name: mongoose.connection.name
+                });
+    
+                return [];
+            }
+    
+            // Count total users for context
+            const totalUsers = await this.UserModel.countDocuments();
+            console.log('Total Users in Database: ' + totalUsers);
+    
+            const users = await this.UserModel.find({
+                [this.options.walletAddressField]: { $exists: true, $ne: null }
+            })
+            .select(this.options.walletAddressField)
+            .lean()
+            .maxTimeMS(10000);  // Increased timeout
+    
+            const wallets = users
+                .map(user => user[this.options.walletAddressField])
+                .filter(wallet => wallet && typeof wallet === 'string')
+                .map(wallet => wallet.toLowerCase());
+    
+            console.log('[Blockchain Listener] Fetched ' + wallets.length + ' valid user wallets');
+            
+            // Log first few wallets for verification
+            console.log('Sample Wallets:', wallets.slice(0, 5));
+    
+            return wallets;
+        } catch (error) {
+            console.error('[CRITICAL] Wallet Fetching Error:', {
+                message: error.message,
+                name: error.name,
+                stack: error.stack
+            });
+            return [];
+        }
+    }
+
+    async startListening() {
+        if (this.isListening) return;
+        this.isListening = true;
+
+        const pollTransactions = async () => {
             try {
-              this.provider = await this.createProvider();
-              this.startListening();
+                // Get the latest block number
+                const currentBlock = await this.web3.eth.getBlockNumber();
+
+                // If no new blocks, skip
+                if (currentBlock <= this.lastProcessedBlock) {
+                    return;
+                }
+
+                console.log('[Blockchain Listener] Processing blocks from ' + (this.lastProcessedBlock + 1) + ' to ' + currentBlock);
+
+                // Fetch blocks since last processed
+                for (let blockNumber = this.lastProcessedBlock + 1; blockNumber <= currentBlock; blockNumber++) {
+                    await this.processBlock(blockNumber);
+                }
+
+                // Update last processed block
+                this.lastProcessedBlock = currentBlock;
             } catch (error) {
-              console.error("Error reconnecting:", error);
+                console.error('[Blockchain Listener] Polling Error:', error);
+            } finally {
+                // Continue polling if still listening
+                if (this.isListening) {
+                    setTimeout(pollTransactions, this.options.pollingInterval);
+                }
             }
-          }, this.options.reconnectDelay);
-        } else {
-          console.error("Maximum reconnection attempts reached. Please restart the service manually.");
-          this.cleanup();
-        }
-      });
-      
-      provider._websocket.on("open", () => {
-        console.log("WebSocket connection established");
-        this.connectionActive = true;
-        this.reconnectAttempts = 0;
-      });
-      
-      provider._websocket.on("error", (error) => {
-        console.error("WebSocket error:", error);
-      });
-      
-      return provider;
-    } catch (error) {
-      console.error("Error creating provider:", error);
-      throw error;
+        };
+
+        // Start initial poll
+        await pollTransactions();
     }
-  }
 
-  async syncWallets() {
-    try {
-      // Get all registered wallets from the database
-      const wallets = await prisma.wallet.findMany({
-        select: {
-          address: true
-        }
-      });
-      
-      // Update the Set with current wallet addresses (case-insensitive)
-      this.registeredWallets.clear();
-      wallets.forEach(wallet => {
-        this.registeredWallets.add(wallet.address.toLowerCase());
-      });
-      
-      console.log(`Synced ${this.registeredWallets.size} wallet addresses`);
-    } catch (error) {
-      console.error("Error syncing wallets:", error);
-    }
-  }
+    async processBlock(blockNumber) {
+        try {
+            // Fetch the full block with transaction details
+            const block = await this.web3.eth.getBlock(blockNumber, true);
 
-  startListening() {
-    // In ethers v6, we'll use a combination of block events and polling
-    this.provider.on("block", (blockNumber) => {
-      this.processNewBlock(blockNumber);
-    });
-    
-    // Also set up a failsafe polling mechanism
-    this.blockPollInterval = setInterval(async () => {
-      try {
-        const latestBlock = await this.provider.getBlockNumber();
-        if (latestBlock > this.latestBlockProcessed) {
-          console.log(`Polling detected new block ${latestBlock}`);
-          this.processNewBlock(latestBlock);
-        }
-      } catch (error) {
-        console.error("Error polling for new blocks:", error);
-      }
-    }, this.options.pollInterval);
-    
-    console.log("Started listening for new blocks");
-  }
+            if (!block || !block.transactions) return;
 
-  async processNewBlock(blockNumber) {
-    try {
-      // Process all blocks from last processed to current
-      for (let i = this.latestBlockProcessed + 1; i <= blockNumber; i++) {
-        await this.processBlock(i);
-      }
-      
-      this.latestBlockProcessed = blockNumber;
-    } catch (error) {
-      console.error(`Error processing block ${blockNumber}:`, error);
-    }
-  }
+            // Fetch all user wallet addresses
+            const userWallets = await this.getUserWallets();
 
-  async processBlock(blockNumber) {
-    try {
-      console.log(`Processing block ${blockNumber}`);
-      const block = await this.provider.getBlock(blockNumber, true);
-      
-      if (!block || !block.transactions) {
-        console.warn(`No transactions found in block ${blockNumber}`);
-        return;
-      }
-      
-      // Process each transaction in the block
-      for (const tx of block.transactions) {
-        await this.checkAndProcessTransaction(tx);
-      }
-      
-      console.log(`Processed ${block.transactions.length} transactions in block ${blockNumber}`);
-    } catch (error) {
-      console.error(`Error processing block ${blockNumber}:`, error);
-    }
-  }
+            // Process each transaction
+            for (const tx of block.transactions) {
+                // Normalize addresses for comparison
+                const fromAddress = tx.from.toLowerCase();
+                const toAddress = tx.to ? tx.to.toLowerCase() : null;
 
-  async checkAndProcessTransaction(tx) {
-    try {
-      const fromAddress = tx.from?.toLowerCase();
-      const toAddress = tx.to?.toLowerCase();
-      
-      // Check if either the sender or receiver is in our registered wallets
-      const isRelevantTransaction = 
-        (fromAddress && this.registeredWallets.has(fromAddress)) || 
-        (toAddress && this.registeredWallets.has(toAddress));
-      
-      if (isRelevantTransaction) {
-        // Get transaction receipt for additional details
-        const receipt = await this.provider.getTransactionReceipt(tx.hash);
-        
-        // Skip if transaction is not confirmed enough
-        if (receipt && receipt.confirmations < this.options.blockConfirmations) {
-          // Track this pending tx to check later
-          this.pendingTxs.set(tx.hash, {
-            tx,
-            blockNumber: receipt.blockNumber
-          });
-          return;
-        }
-        
-        // Process the relevant transaction
-        await this.handleRelevantTransaction(tx, receipt);
-      }
-    } catch (error) {
-      console.error(`Error checking transaction ${tx.hash}:`, error);
-    }
-  }
+                // Check if transaction involves any of our users
+                const isRelevantTransaction = userWallets.some(
+                    wallet => fromAddress === wallet || toAddress === wallet
+                );
 
-  async checkPendingTransactions() {
-    // Process any pending transactions that might have enough confirmations now
-    for (const [hash, data] of this.pendingTxs.entries()) {
-      try {
-        const receipt = await this.provider.getTransactionReceipt(hash);
-        
-        if (receipt && receipt.confirmations >= this.options.blockConfirmations) {
-          await this.handleRelevantTransaction(data.tx, receipt);
-          this.pendingTxs.delete(hash);
-        }
-      } catch (error) {
-        console.error(`Error checking pending transaction ${hash}:`, error);
-      }
-    }
-  }
+                if (isRelevantTransaction) {
+                    console.log('[Blockchain Listener] Relevant Transaction Found in Block ' + blockNumber);
+                    
+                    // Fetch transaction receipt for additional details
+                    const txReceipt = await this.web3.eth.getTransactionReceipt(tx.hash);
 
-  async handleRelevantTransaction(tx, receipt) {
-    try {
-      // Extract important transaction details
-      const txDetails = {
-        hash: tx.hash,
-        from: tx.from,
-        to: tx.to,
-        value: ethers.formatEther(tx.value),
-        blockNumber: tx.blockNumber,
-        timestamp: (await this.provider.getBlock(tx.blockNumber)).timestamp,
-        gasUsed: receipt ? receipt.gasUsed.toString() : tx.gasLimit.toString(),
-        gasPrice: ethers.formatUnits(tx.gasPrice || tx.maxFeePerGas || 0, 'gwei'),
-        status: receipt ? (receipt.status ? 'success' : 'failed') : 'unknown'
-      };
-      
-      console.log(`Relevant transaction detected: ${txDetails.hash}`);
-      
-      // Store transaction in database
-      await this.storeTransaction(txDetails);
-      
-      // Trigger notification for the relevant wallet(s)
-      await this.triggerNotification(txDetails);
-    } catch (error) {
-      console.error(`Error handling transaction ${tx.hash}:`, error);
-    }
-  }
-
-  async storeTransaction(txDetails) {
-    try {
-      // Store transaction in the database
-      await prisma.transaction.create({
-        data: {
-          hash: txDetails.hash,
-          fromAddress: txDetails.from,
-          toAddress: txDetails.to,
-          value: txDetails.value,
-          blockNumber: txDetails.blockNumber,
-          timestamp: new Date(txDetails.timestamp * 1000),
-          gasUsed: txDetails.gasUsed,
-          gasPrice: txDetails.gasPrice,
-          status: txDetails.status
-        }
-      });
-      
-      console.log(`Transaction ${txDetails.hash} stored in database`);
-    } catch (error) {
-      // Handle duplicate transaction errors gracefully
-      if (!error.toString().includes("Unique constraint")) {
-        console.error(`Error storing transaction ${txDetails.hash}:`, error);
-      }
-    }
-  }
-
-  async triggerNotification(txDetails) {
-    try {
-      // Find users associated with the wallet addresses
-      const fromWallet = txDetails.from?.toLowerCase();
-      const toWallet = txDetails.to?.toLowerCase();
-      
-      const userWallets = await prisma.wallet.findMany({
-        where: {
-          OR: [
-            { address: { equals: fromWallet, mode: 'insensitive' } },
-            { address: { equals: toWallet, mode: 'insensitive' } }
-          ]
-        },
-        include: {
-          user: {
-            include: {
-              notificationPreferences: true
+                    // Emit event for relevant transaction
+                    this.emit('transaction', {
+                        blockNumber,
+                        transactionHash: tx.hash,
+                        from: tx.from,
+                        to: tx.to,
+                        value: this.web3.utils.fromWei(tx.value, 'ether'),
+                        timestamp: block.timestamp,
+                        gasUsed: txReceipt ? txReceipt.gasUsed : null,
+                        status: txReceipt ? txReceipt.status : null
+                    });
+                }
             }
-          }
+        } catch (error) {
+            console.error('[Blockchain Listener] Error processing block ' + blockNumber + ':', error);
         }
-      });
-      
-      // Process notifications for each affected user
-      for (const wallet of userWallets) {
-        const isOutgoing = wallet.address.toLowerCase() === fromWallet;
-        const type = isOutgoing ? 'OUTGOING' : 'INCOMING';
-        
-        // Create notification entry
-        await prisma.notification.create({
-          data: {
-            userId: wallet.userId,
-            type: type,
-            message: `${type} transaction of ${txDetails.value} ETH ${isOutgoing ? 'to' : 'from'} ${isOutgoing ? txDetails.to : txDetails.from}`,
-            transactionHash: txDetails.hash,
-            read: false,
-          }
-        });
-        
-        console.log(`Notification created for user ${wallet.userId} for transaction ${txDetails.hash}`);
-        
-        // Check if user has enabled notifications for this type
-        if (wallet.user.notificationPreferences?.some(pref => 
-          pref.type === type && pref.enabled
-        )) {
-          // Trigger push notification, email, etc. based on user preferences
-          // This would integrate with your notification service
-          console.log(`Push notification triggered for user ${wallet.userId}`);
+    }
+
+    async findRelevantUsers(transactionAddress) {
+        try {
+            return await this.UserModel.find({
+                [this.options.walletAddressField]: { $regex: new RegExp('^' + transactionAddress + '$', 'i') },
+                [this.options.notificationEnabledField]: true
+            });
+        } catch (error) {
+            console.error('[Blockchain Listener] Error finding relevant users:', error);
+            return [];
         }
-      }
-    } catch (error) {
-      console.error(`Error creating notification for transaction ${txDetails.hash}:`, error);
     }
-  }
 
-  stopListening() {
-    if (this.blockPollInterval) {
-      clearInterval(this.blockPollInterval);
-      this.blockPollInterval = null;
+    stopListening() {
+        this.isListening = false;
+        if (this.web3 && this.web3.currentProvider) {
+            this.web3.currentProvider.disconnect();
+        }
+        console.log('[Blockchain Listener] Stopped listening');
     }
-    if (this.walletSyncIntervalId) {
-      clearInterval(this.walletSyncIntervalId);
-      this.walletSyncIntervalId = null;
-    }
-    this.cleanup();
-  }
-
-  cleanup() {
-    // Clear intervals and remove listeners
-    if (this.walletSyncIntervalId) {
-      clearInterval(this.walletSyncIntervalId);
-    }
-    
-    if (this.blockPollInterval) {
-      clearInterval(this.blockPollInterval);
-    }
-    
-    if (this.provider && this.connectionActive) {
-      this.provider.removeAllListeners();
-    }
-    
-    console.log("Blockchain listener resources cleaned up");
-  }
 }
 
 module.exports = BlockchainListener;
