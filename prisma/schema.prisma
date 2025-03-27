@@ -1,0 +1,23 @@
+// schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                     String   @id @default(auto()) @map("_id") @db.ObjectId
+  name                   String
+  email                  String   @unique
+  walletAddress          String   @unique
+  fcmToken               String
+  notificationsEnabled   Boolean  @default(true)
+  lastActivityTimestamp  DateTime @default(now())
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@map("users") // This must match your Mongoose collection name
+}
