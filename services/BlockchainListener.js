@@ -328,6 +328,18 @@ class BlockchainListener {
     }
   }
 
+  stopListening() {
+    if (this.blockPollInterval) {
+      clearInterval(this.blockPollInterval);
+      this.blockPollInterval = null;
+    }
+    if (this.walletSyncIntervalId) {
+      clearInterval(this.walletSyncIntervalId);
+      this.walletSyncIntervalId = null;
+    }
+    this.cleanup();
+  }
+
   cleanup() {
     // Clear intervals and remove listeners
     if (this.walletSyncIntervalId) {
